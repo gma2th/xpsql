@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+#/xpsql is a simple psql wrapper to run queries asynchronously on multiple databases.
+#/
+#/Usage:
+#/  psql [OPTION]... [DBNAMES]
+#/
+#/Options:
+#/  -c, --command=COMMAND     execute command, then exit
+#/  -f, --file=FILENAME       execute commands from file, then exit
+#/  -h, --help                show this help, then exit
+#/  -m, --max-line=MAX_LINE   max line to display, print 25, 0 print all
+#/  -s, --services=SERVICES   database services
+#/  -U, --username=USERNAME   database user namee
+
+usage() { grep '^#/' "$0" | cut -c4- ; exit 0 ;  }
+
+readonly BASEDIR=/tmp/xpsql
+
+subprocess_pids=()
+# Kill all process if interupted
+trap 'kill $subprocess_pids; exit 1' SIGINT
+
+max_line=25
+sql_query=""
+sql_file=""
+sql_username=""
+sql_uris=()
+sql_services=()
+
+# Parse args
+if [ $# -eq 0 ]; then
+    echo -e "xpsql: no options supplied\nTry \"xpsql --help\" for more information." >&2
+    exit 1
+fi
+while (( "$#" )); do
+  case "$1" in
+    -c|--command)
+        sql_query=$2
+        shift 2
+        ;;
+    -f|--file)
+        sql_file=$2
+        shift 2
+        ;;
+    -s|--service)
+        sql_services+=( "$2" )
+        shift 2
+        ;;
+    -U|--username)
+        sql_username+=( "$2" )
+        shift 2
+        ;;
+    -m|--max-line)
+        max_line="$2"
+        shift 2
+        ;;
+    -h|--help)
+        usage
+        ;;
+    --) # end argument parsing
+        shift
+        break
+        ;;
+    -*|--*=) # unsupported flags
+        echo -e "xpsql: unrecognized option $1\nTry \"xpsql --help\" for more information." >&2
+        exit 1
+        ;;
+    *) # preserve positional arguments
+        sql_uris+=( "$1" )
+        shift
+        ;;
+  esac
+done
+
+psql_command_suffix=""
+# Return if both command and file are set or not set
+if [[ -n "$sql_query" ]] ^ [[ -n "$sql_query" ]]; then
+    echo -e "xpsql: Specify either command or file." >&2
+    exit 1
+fi;
+if [ -n "$sql_query" ]; then
+    psql_command_suffix+="-c \"$sql_query\""
+elif [ -n "$sql_file" ]; then
+    psql_command_suffix+="-f \"$sql_file\""
+else
+    echo -e "xpsql: Specify either command or file." >&2
+    exit 1
+fi;
+
+# Execute query
+function do_query() {
+    local filepath=$BASEDIR.$file_suffix.out
+    echo "-[ $name_to_display ]" > "$filepath"
+    # -X do not read startup file (~/.psqlrc)
+    # -x turn on expanded table output
+    local psql_command="psql -X -x $psql_command_suffix"
+    eval "$psql_command"  1>> "$filepath" &
+    subprocess_pids+=( $! ) # pid of last command run
+}
+
+for sql_service in ${sql_services[*]}; do
+    name_to_display="$sql_service"
+    psql_command_suffix="$psql_command_suffix service=$sql_service"
+    file_suffix="$sql_service"
+    do_query
+done;
+
+for sql_uri in ${sql_uris[*]}; do
+    name_to_display="$sql_uri"
+    psql_command_suffix="$psql_command_suffix $sql_uri"
+    file_suffix=$(echo "$sql_uri" | md5)
+    do_query
+done;
+
+for subprocess_pid in ${subprocess_pids[*]}; do
+    wait "$subprocess_pid"
+done;
+subprocess_pid=()
+
+# Display
+editor=$(cat)
+if [ "$max_line" -ne 0 ] && [ "$(cat "$BASEDIR".*.out | wc -l)" -gt "$max_line" ]; then
+    editor=less
+fi;
+
+$editor $BASEDIR.*.out
+rm $BASEDIR.*.out
